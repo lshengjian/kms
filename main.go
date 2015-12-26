@@ -1,138 +1,103 @@
 package main
 
 import (
-	"fmt"
-	"io/ioutil"
-
-	"io"
-	"net/http"
-	"os"
-	"labix.org/v2/mgo"
-        "labix.org/v2/mgo/bson"
+    "fmt"
+    "os"
+   	"os/signal"
+	"syscall"
+    "flag"
+    "sync"
+    "net/http"
 	"github.com/labstack/echo"
 	mw "github.com/labstack/echo/middleware"
+    "github.com/golang/glog"
 )
-type Person struct {
-  NAME  string
-  PHONE string
+func OnInterrupt(fn func()) {
+	// deal with control+c,etc
+	signalChan := make(chan os.Signal, 1)
+	// controlling terminal close, daemon not exit
+	signal.Ignore(syscall.SIGHUP)
+	signal.Notify(signalChan,
+		os.Interrupt,
+		os.Kill,
+		syscall.SIGALRM,
+		// syscall.SIGHUP,
+		syscall.SIGINT,
+		syscall.SIGTERM,
+		syscall.SIGQUIT)
+	go func() {
+		for _ = range signalChan {
+			fn()
+			os.Exit(0)
+		}
+	}()
 }
 
-type Men struct {
-  Persons []Person
+func debug(params ...interface{}) {
+	glog.V(4).Infoln(params)
+}
+var exitStatus = 0
+var exitMu sync.Mutex
+
+func setExitStatus(n int) {
+	exitMu.Lock()
+	if exitStatus < n {
+		exitStatus = n
+	}
+	exitMu.Unlock()
+}
+func usage() {
+	fmt.Fprintf(os.Stderr, "For Logging, use \"kms [logging_options] [command]\".")
+	os.Exit(2)
+}
+var atexitFuncs []func()
+
+func atexit(f func()) {
+	atexitFuncs = append(atexitFuncs, f)
 }
 
-const  (
-  URL = "192.168.1.178:27017"
-)
-
-func upload(c *echo.Context) error {
-	mr, err := c.Request().MultipartReader()
-	if err != nil {
-		return err
+func exit() {
+	for _, f := range atexitFuncs {
+		f()
 	}
-
-	// Read form field `name`
-	part, err := mr.NextPart()
-	if err != nil {
-		return err
-	}
-	defer part.Close()
-	b, err := ioutil.ReadAll(part)
-	if err != nil {
-		return err
-	}
-	name := string(b)
-
-	// Read form field `email`
-	part, err = mr.NextPart()
-	if err != nil {
-		return err
-	}
-	defer part.Close()
-	b, err = ioutil.ReadAll(part)
-	if err != nil {
-		return err
-	}
-	email := string(b)
-
-	// Read files
-	i := 0
-	for {
-		part, err := mr.NextPart()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return err
-		}
-		defer part.Close()
-
-		file, err := os.Create("uploads/"+part.FileName())
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-
-		if _, err := io.Copy(file, part); err != nil {
-			return err
-		}
-		i++
-	}
-	return c.String(http.StatusOK, fmt.Sprintf("Thank You! %s <%s>, %d files uploaded successfully.",name, email, i))
-}
-
-func DbDemo(){
-  session, err := mgo.Dial(URL)
-  if err != nil {
-    panic(err)
-  }
-  defer session.Close()
-  session.SetMode(mgo.Monotonic, true)
-  db := session.DB("mydb")
-  collection := db.C("person")
-
-
-
-  countNum, err := collection.Count()
-  if err != nil {
-    panic(err)
-  }
-  fmt.Println("Things objects count: ", countNum)
-
-
-  temp := &Person{PHONE: "18811577546", NAME:  "zhangzheHero"}
-  err = collection.Insert(&Person{"Ale", "+55 53 8116 9639"}, temp)
-  if err != nil {
-    panic(err)
-  }
-
-  result := Person{}
-  err = collection.Find(bson.M{"phone": "456"}).One(&result)
-  fmt.Println("Phone:", result.NAME, result.PHONE)
-
-  var personAll Men
-  iter := collection.Find(nil).Iter()
-  for iter.Next(&result) {
-    fmt.Printf("Result: %v\n", result.NAME)
-    personAll.Persons = append(personAll.Persons, result)
-  }
-
-  err = collection.Update(bson.M{"name": "ccc"}, bson.M{"$set": bson.M{"name": "ddd"}})
-  //err = collection.Update(bson.M{"name": "ddd"}, bson.M{"$set": bson.M{"phone": "12345678"}})
-  //err = collection.Update(bson.M{"name": "aaa"}, bson.M{"phone": "1245", "name": "bbb"})
-  _, err = collection.RemoveAll(bson.M{"name": "Ale"})
-
+	os.Exit(exitStatus)
 }
 
 func main() {
-        DbDemo()
+	//flag.Usage = usage
+    flag.Set("alsologtostderr", "true")
+	flag.Set("log_dir", "logs")
+	//flag.Set("v", "4")
+	flag.Parse()
+    args := flag.Args()
+    if len(args) < 1 {
+		usage()
+	}
+    atexit(func() {
+       glog.Flush()
+    })
+    
+    OnInterrupt(func() {
+		exitStatus=2
+		exit()
+	})
 	e := echo.New()
 	e.Use(mw.Logger())
 	e.Use(mw.Recover())
 
 	e.Static("/", "public")
-	e.Post("/upload", upload)
-	print("start at port:3000!");
+	e.Index("public/index.html")
 
+	e.Favicon("public/favicon.ico")
+
+	e.Post("/upload", upload)
+
+	e.Get("/hello", func(c *echo.Context) error {
+		return c.String(http.StatusOK, "Hello!")
+	})
+
+	//print("start at port:3000!");
+    debug("start at port:3000!")
+    
 	e.Run(":3000")
 }
