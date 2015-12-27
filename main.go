@@ -3,41 +3,24 @@ package main
 import (
     "fmt"
     "os"
-   	"os/signal"
-	"syscall"
+	"io"
     "flag"
     "sync"
-    "net/http"
-	"github.com/labstack/echo"
-	mw "github.com/labstack/echo/middleware"
+    "text/template"
     "github.com/golang/glog"
-)
-func OnInterrupt(fn func()) {
-	// deal with control+c,etc
-	signalChan := make(chan os.Signal, 1)
-	// controlling terminal close, daemon not exit
-	signal.Ignore(syscall.SIGHUP)
-	signal.Notify(signalChan,
-		os.Interrupt,
-		os.Kill,
-		syscall.SIGALRM,
-		// syscall.SIGHUP,
-		syscall.SIGINT,
-		syscall.SIGTERM,
-		syscall.SIGQUIT)
-	go func() {
-		for _ = range signalChan {
-			fn()
-			os.Exit(0)
-		}
-	}()
-}
+    "github.com/lshengjian/kms/util"
 
-func debug(params ...interface{}) {
-	glog.V(4).Infoln(params)
-}
+
+)
 var exitStatus = 0
 var exitMu sync.Mutex
+var commands = []*Command{
+    cmdWeb,
+	cmdDownload,
+	cmdVersion,
+}
+
+
 
 func setExitStatus(n int) {
 	exitMu.Lock()
@@ -46,58 +29,107 @@ func setExitStatus(n int) {
 	}
 	exitMu.Unlock()
 }
-func usage() {
-	fmt.Fprintf(os.Stderr, "For Logging, use \"kms [logging_options] [command]\".")
-	os.Exit(2)
-}
-var atexitFuncs []func()
 
-func atexit(f func()) {
-	atexitFuncs = append(atexitFuncs, f)
-}
+var usageTemplate = `
+KMS: store billions of files and serve them fast!
 
-func exit() {
-	for _, f := range atexitFuncs {
-		f()
-	}
-	os.Exit(exitStatus)
-}
+Usage:
+
+	kms command [arguments]
+
+The commands are:
+{{range .}}
+    {{.Name | printf "%-11s"}} {{.Short}}{{end}}
+
+Use "kms help [command]" for more information about a command.
+
+`
 
 func main() {
-	//flag.Usage = usage
+	flag.Usage = usage
     flag.Set("alsologtostderr", "true")
 	flag.Set("log_dir", "logs")
-	//flag.Set("v", "4")
+	flag.Set("v", "4")
 	flag.Parse()
     args := flag.Args()
     if len(args) < 1 {
 		usage()
 	}
-    atexit(func() {
-       glog.Flush()
-    })
     
-    OnInterrupt(func() {
+    util.OnInterrupt(func() {
 		exitStatus=2
-		exit()
+        glog.Flush()
+		os.Exit(2)
 	})
-	e := echo.New()
-	e.Use(mw.Logger())
-	e.Use(mw.Recover())
+    if args[0] == "help" {
+		help(args[1:])
+		for _, cmd := range commands {
+			if len(args) >= 2 && cmd.Name() == args[1] && cmd.ExecuteFunc != nil {
+				fmt.Fprintf(os.Stderr, "Default Parameters:\n")
+				cmd.Flag.PrintDefaults()
+			}
+		}
+		return
+	}
 
-	e.Static("/", "public")
-	e.Index("public/index.html")
+	for _, cmd := range commands {
+		if cmd.Name() == args[0] && cmd.ExecuteFunc != nil {
+			cmd.Flag.Usage = func() { cmd.Usage() }
+			cmd.Flag.Parse(args[1:])
+			args = cmd.Flag.Args()
+			if !cmd.ExecuteFunc(cmd, args) {
+				fmt.Fprintf(os.Stderr, "\n")
+				cmd.Flag.Usage()
+				fmt.Fprintf(os.Stderr, "Default Parameters:\n")
+				cmd.Flag.PrintDefaults()
+			}
+			return
+		}
+	}
+    util.Debug("start KMS at port:3000!")
+	
+}
+func tmpl(w io.Writer, text string, data interface{}) {
+	t := template.New("top")
+	//t.Funcs(template.FuncMap{"trim": strings.TrimSpace, "capitalize": capitalize})
+	template.Must(t.Parse(text))
+	if err := t.Execute(w, data); err != nil {
+		panic(err)
+	}
+}
+func usage() {
+    printUsage(os.Stderr)
+	fmt.Fprintf(os.Stderr, "For Logging, use \"kms [logging_options] [command]\".")
+    flag.PrintDefaults()
+	os.Exit(2)
+}
+func printUsage(w io.Writer) {
+	tmpl(w, usageTemplate, commands)
+}
+var helpTemplate = `Usage: kms {{.UsageLine}}
+  {{.Long}}
+`
+func help(args []string) {
+	if len(args) == 0 {
+		printUsage(os.Stdout)
+		// not exit 2: succeeded at 'kms help'.
+		return
+	}
+	if len(args) != 1 {
+		fmt.Fprintf(os.Stderr, "usage: kms help command\n\nToo many arguments given.\n")
+		os.Exit(2) // failed at 'kms help'
+	}
 
-	e.Favicon("public/favicon.ico")
+	arg := args[0]
 
-	e.Post("/upload", upload)
+	for _, cmd := range commands {
+		if cmd.Name() == arg {
+			tmpl(os.Stdout, helpTemplate, cmd)
+			// not exit 2: succeeded at 'kms help cmd'.
+			return
+		}
+	}
 
-	e.Get("/hello", func(c *echo.Context) error {
-		return c.String(http.StatusOK, "Hello!")
-	})
-
-	//print("start at port:3000!");
-    debug("start at port:3000!")
-    
-	e.Run(":3000")
+	fmt.Fprintf(os.Stderr, "Unknown help topic %#q.  Run 'kms help'.\n", arg)
+	os.Exit(2) // failed at 'kms help cmd'
 }

@@ -12,14 +12,11 @@ import (
 	"strings"
 	"os"
 	"bytes"
-    "golang.org/x/text/encoding/simplifiedchinese"
+    simplejson "github.com/bitly/go-simplejson"
 	"github.com/labstack/echo"
+    ui "github.com/lshengjian/kms/webui"
 
 )
-var (
-  WEED_SERVER="http://localhost:8888"
-)
-
 
 
 var fileNameEscaper = strings.NewReplacer("\\", "\\\\", "\"", "\\\"")
@@ -67,7 +64,7 @@ func upload(c *echo.Context) error {
 		}
 		
 		fh, _ := os.Open(fullPathFilename)
-		url:=WEED_SERVER+"/"+name+"/"+fname
+		url:="http://"+*web.filerServer+"/"+name+"/"+fname
 		err=upload2FileServer(url, func(w io.Writer) (err error) {
 		   _, err = io.Copy(w, fh)
 		   return 
@@ -77,22 +74,44 @@ func upload(c *echo.Context) error {
 		  fmt.Println(err)
 		}
 	}
-	return c.String(http.StatusOK, fmt.Sprintf("Thank You! %s , %d files uploaded successfully.",name,  i))
+
+
+  args := make(map[string]interface{})  
+  nodes,_ := listFileServer("http://"+*web.filerServer+"/"+name+"/")
+  args["Author"] = name
+  args["Master"]="http://"+*web.masterServer
+  args["Files"] = nodes["Files"]
+  return ui.FilesTpl.Execute(c.Response().Writer(), args)
+	//return c.String(http.StatusOK, fmt.Sprintf("Thank You! %s , %d files uploaded successfully.",name,  i))
 }
+
+
 type UploadResult struct {
 	Name  string `json:"name,omitempty"`
 	Size  uint32 `json:"size,omitempty"`
 	Error string `json:"error,omitempty"`
 }
-func utf8ToGBK(text string) (string, error) {
-    dst := make([]byte, len(text)*2)
-    tr := simplifiedchinese.GB18030.NewEncoder()
-    nDst, _, err := tr.Transform(dst, []byte(text), true)
-    if err != nil {
-        return text, err
-    }
-    return string(dst[:nDst]), nil
+func listFileServer(url string) (map[string]interface{},error) {
+    client:=&http.Client{Transport: &http.Transport{
+		MaxIdleConnsPerHost: 1024,
+	}}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil,err
+	}
+	defer resp.Body.Close()
+	respBody, raErr := ioutil.ReadAll(resp.Body)
+	if raErr != nil {
+		return nil,raErr
+	}
+    js, _ := simplejson.NewJson(respBody)
+    
+	nodes, err2 := js.Map()
+	//unmarshalErr := json.Unmarshal(resp_body, &ret)
+   // fmt.Println(ret);
+	return nodes, err2
 }
+
 
 func upload2FileServer(uploadUrl string, fillBufferFunction func(w io.Writer) error, filename string) (error) {
 	body_buf := bytes.NewBufferString("")
@@ -131,3 +150,4 @@ func upload2FileServer(uploadUrl string, fillBufferFunction func(w io.Writer) er
     fmt.Println(ret);
 	return unmarshal_err
 }
+
